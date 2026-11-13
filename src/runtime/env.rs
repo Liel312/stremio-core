@@ -6,6 +6,7 @@ use crate::constants::{
 };
 use crate::models::ctx::Ctx;
 use crate::models::streaming_server::StreamingServer;
+use crate::types::remote_config::ClientInfo;
 use chrono::{DateTime, FixedOffset, Local, Utc};
 use futures::{future, Future, TryFutureExt};
 use http::Request;
@@ -155,6 +156,7 @@ pub trait Env {
         Self::now().with_timezone(&Local).fixed_offset()
     }
     fn flush_analytics() -> EnvFuture<'static, ()>;
+    fn client_info() -> ClientInfo;
     fn analytics_context(
         ctx: &Ctx,
         streaming_server: &StreamingServer,
@@ -984,6 +986,41 @@ mod test {
                     .expect("Should have the schema set"),
                 "Scheme version should now be updated"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_subtitle_filter_loads_without_migrating_existing_storage() {
+        use crate::types::profile::Profile;
+
+        for already_configured in [false, true] {
+            let _guard = TestEnv::reset().expect("Should lock TestEnv");
+            let mut expected = Profile::default();
+            expected.settings.subtitles_language = Some("fra".to_owned());
+            expected.settings.secondary_subtitles_language = Some("jpn".to_owned());
+            expected.settings.secondary_audio_language = Some("fra".to_owned());
+            expected.settings.subtitles_auto_select = false;
+            if already_configured {
+                expected.settings.subtitles_language_filter_enabled = true;
+            }
+            let mut profile = serde_json::to_value(&expected).unwrap();
+            if !already_configured {
+                let settings = profile["settings"].as_object_mut().unwrap();
+                settings.remove("subtitlesLanguageFilterEnabled");
+            }
+            set_profile_and_schema_version(&profile, 25);
+            TestEnv::migrate_storage_schema()
+                .await
+                .expect("Should migrate");
+            assert_storage_schema_version(25);
+            let storage = STORAGE.read().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(storage.get(PROFILE_STORAGE_KEY).unwrap()).unwrap(),
+                profile
+            );
+            let reloaded: Profile =
+                serde_json::from_str(storage.get(PROFILE_STORAGE_KEY).unwrap()).unwrap();
+            assert_eq!(reloaded, expected);
         }
     }
 
